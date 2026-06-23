@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { getStore } from '@/lib/store';
+import { v4Polyfill as uuid } from '@/lib/uuid';
 
 export async function POST(request: Request) {
   try {
@@ -10,24 +11,31 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    const claim = await prisma.claim.create({
-      data: {
-        patientId,
-        treatmentCode,
-        treatmentDesc,
-        totalCharge: parseFloat(totalCharge),
-        status: 'Draft',
-        riskScore: 'Medium',
-      },
-    });
+    const store = getStore();
 
-    await prisma.auditLog.create({
-      data: {
-        userId: userId || null,
-        userName: userName || 'Billing Manager',
-        action: 'Create Claim',
-        details: `Created draft claim for patient ID ${patientId}. Amount: $${totalCharge}.`,
-      },
+    const claim = {
+      id: uuid(),
+      patientId,
+      treatmentCode,
+      treatmentDesc,
+      totalCharge: parseFloat(totalCharge),
+      insurancePaid: 0.0,
+      patientPaid: 0.0,
+      status: 'Draft',
+      riskScore: 'Medium',
+      missingCodes: null as string | null,
+      createdAt: new Date().toISOString(),
+    };
+
+    store.claims.push(claim);
+
+    store.auditLogs.push({
+      id: uuid(),
+      userId: userId || null,
+      userName: userName || 'Billing Manager',
+      action: 'Create Claim',
+      details: `Created draft claim for patient ID ${patientId}. Amount: $${totalCharge}.`,
+      timestamp: new Date().toISOString(),
     });
 
     return NextResponse.json(claim);
@@ -49,31 +57,25 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: 'Claim ID and Action are required' }, { status: 400 });
     }
 
-    const claim = await prisma.claim.findUnique({
-      where: { id: claimId },
-      include: {
-        patient: true,
-      },
-    });
+    const store = getStore();
 
-    if (!claim) {
+    const claimIndex = store.claims.findIndex((c) => c.id === claimId);
+    if (claimIndex === -1) {
       return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
     }
 
-    let updatedClaim;
+    const claim = store.claims[claimIndex];
+    const patient = store.patients.find((p) => p.id === claim.patientId);
 
     if (action === 'check_readiness') {
-      // Analyze readiness based on code
       let riskScore = 'Low';
-      let missingCodes = [];
+      const missingCodes: string[] = [];
 
-      // Check for missing data
-      if (!claim.patient.insuranceProvider || !claim.patient.memberId) {
+      if (!patient?.insuranceProvider || !patient?.memberId) {
         missingCodes.push('Missing active insurance provider details');
         riskScore = 'High';
       }
 
-      // Check code formatting
       if (!claim.treatmentCode.startsWith('D') && !claim.treatmentCode.startsWith('C')) {
         missingCodes.push('Invalid ICD-10 or Dental Procedure code format');
         riskScore = 'High';
@@ -89,7 +91,6 @@ export async function PUT(request: Request) {
         riskScore = 'Medium';
       }
 
-      // Mock audit check: if there is no diagnosis code
       if (!claim.treatmentCode.match(/^D\d{4}$/) && !claim.treatmentCode.match(/^[A-Z]\d{2}\.?\d?$/)) {
         missingCodes.push('Missing standard diagnosis code (ICD-10)');
         riskScore = 'High';
@@ -97,120 +98,102 @@ export async function PUT(request: Request) {
 
       const missingCodesStr = missingCodes.join(', ');
 
-      updatedClaim = await prisma.claim.update({
-        where: { id: claimId },
-        data: {
-          riskScore,
-          missingCodes: missingCodesStr || null,
-          status: missingCodes.length > 0 ? 'Reviewing' : 'Ready',
-        },
-      });
+      store.claims[claimIndex] = {
+        ...claim,
+        riskScore,
+        missingCodes: missingCodesStr || null,
+        status: missingCodes.length > 0 ? 'Reviewing' : 'Ready',
+      };
 
-      await prisma.auditLog.create({
-        data: {
-          userId: userId || null,
-          userName: userName || 'AI Auditor',
-          action: 'Readiness Audit',
-          details: `Performed AI audit check on claim ${claimId}. Results: Risk ${riskScore}, Issues identified: ${missingCodes.length}.`,
-        },
+      store.auditLogs.push({
+        id: uuid(),
+        userId: userId || null,
+        userName: userName || 'AI Auditor',
+        action: 'Readiness Audit',
+        details: `Performed AI audit check on claim ${claimId}. Results: Risk ${riskScore}, Issues identified: ${missingCodes.length}.`,
+        timestamp: new Date().toISOString(),
       });
     } else if (action === 'submit') {
-      // Submit claim to insurer
-      const estimatedPaid = claim.totalCharge * 0.8; // Assume 80% coverage
+      const estimatedPaid = claim.totalCharge * 0.8;
       const patientResp = claim.totalCharge - estimatedPaid;
 
-      updatedClaim = await prisma.claim.update({
-        where: { id: claimId },
-        data: {
-          status: 'Submitted',
-          insurancePaid: estimatedPaid,
-          patientPaid: patientResp,
-        },
+      store.claims[claimIndex] = {
+        ...claim,
+        status: 'Submitted',
+        insurancePaid: estimatedPaid,
+        patientPaid: patientResp,
+      };
+
+      store.auditLogs.push({
+        id: uuid(),
+        userId: userId || null,
+        userName: userName || 'Billing Manager',
+        action: 'Submit Claim',
+        details: `Submitted claim ${claimId} to ${patient?.insuranceProvider || 'insurer'}. Expected Paid: $${estimatedPaid.toFixed(2)}.`,
+        timestamp: new Date().toISOString(),
       });
 
-      await prisma.auditLog.create({
-        data: {
-          userId: userId || null,
-          userName: userName || 'Billing Manager',
-          action: 'Submit Claim',
-          details: `Submitted claim ${claimId} to ${claim.patient.insuranceProvider || 'insurer'}. Expected Paid: $${estimatedPaid.toFixed(2)}.`,
-        },
-      });
-
-      // Also create a payment if submitted successfully
-      await prisma.payment.create({
-        data: {
-          patientId: claim.patientId,
-          amount: estimatedPaid,
-          method: 'Insurance',
-          status: 'Pending',
-        },
+      store.payments.push({
+        id: uuid(),
+        patientId: claim.patientId,
+        amount: estimatedPaid,
+        method: 'Insurance',
+        status: 'Pending',
+        createdAt: new Date().toISOString(),
       });
     } else if (action === 'approve') {
-      // Approve and settle claim (Paid)
-      updatedClaim = await prisma.claim.update({
-        where: { id: claimId },
-        data: {
-          status: 'Paid',
-        },
-      });
+      store.claims[claimIndex] = {
+        ...claim,
+        status: 'Paid',
+      };
 
-      // Complete payment
-      const pendingPayment = await prisma.payment.findFirst({
-        where: { patientId: claim.patientId, status: 'Pending' },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      if (pendingPayment) {
-        await prisma.payment.update({
-          where: { id: pendingPayment.id },
-          data: { status: 'Completed' },
-        });
+      const pendingPaymentIndex = store.payments.findIndex(
+        (p) => p.patientId === claim.patientId && p.status === 'Pending'
+      );
+      if (pendingPaymentIndex !== -1) {
+        store.payments[pendingPaymentIndex] = {
+          ...store.payments[pendingPaymentIndex],
+          status: 'Completed',
+        };
       }
 
-      await prisma.auditLog.create({
-        data: {
-          userId: userId || null,
-          userName: userName || 'Payer Gateway',
-          action: 'Settle Claim',
-          details: `Claim ${claimId} approved and settled by insurer. Paid: $${claim.insurancePaid.toFixed(2)}.`,
-        },
+      store.auditLogs.push({
+        id: uuid(),
+        userId: userId || null,
+        userName: userName || 'Payer Gateway',
+        action: 'Settle Claim',
+        details: `Claim ${claimId} approved and settled by insurer. Paid: $${claim.insurancePaid.toFixed(2)}.`,
+        timestamp: new Date().toISOString(),
       });
     } else if (action === 'deny') {
-      // Deny claim
-      updatedClaim = await prisma.claim.update({
-        where: { id: claimId },
-        data: {
-          status: 'Denied',
-          insurancePaid: 0.0,
-          patientPaid: claim.totalCharge,
-        },
-      });
+      store.claims[claimIndex] = {
+        ...claim,
+        status: 'Denied',
+        insurancePaid: 0.0,
+        patientPaid: claim.totalCharge,
+      };
 
-      // Fail pending payment
-      const pendingPayment = await prisma.payment.findFirst({
-        where: { patientId: claim.patientId, status: 'Pending' },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      if (pendingPayment) {
-        await prisma.payment.update({
-          where: { id: pendingPayment.id },
-          data: { status: 'Failed' },
-        });
+      const pendingPaymentIndex = store.payments.findIndex(
+        (p) => p.patientId === claim.patientId && p.status === 'Pending'
+      );
+      if (pendingPaymentIndex !== -1) {
+        store.payments[pendingPaymentIndex] = {
+          ...store.payments[pendingPaymentIndex],
+          status: 'Failed',
+        };
       }
 
-      await prisma.auditLog.create({
-        data: {
-          userId: userId || null,
-          userName: userName || 'Payer Gateway',
-          action: 'Deny Claim',
-          details: `Claim ${claimId} denied by insurer due to missing authorization.`,
-        },
+      store.auditLogs.push({
+        id: uuid(),
+        userId: userId || null,
+        userName: userName || 'Payer Gateway',
+        action: 'Deny Claim',
+        details: `Claim ${claimId} denied by insurer due to missing authorization.`,
+        timestamp: new Date().toISOString(),
       });
     }
 
-    return NextResponse.json(updatedClaim);
+    return NextResponse.json(store.claims[claimIndex]);
   } catch (error: any) {
     console.error('Error updating claim:', error);
     return NextResponse.json(

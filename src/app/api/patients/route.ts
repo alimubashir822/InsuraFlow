@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { getStore } from '@/lib/store';
+import { v4Polyfill as uuid } from '@/lib/uuid';
 
 export async function POST(request: Request) {
   try {
@@ -10,36 +11,39 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Name and Date of Birth are required' }, { status: 400 });
     }
 
-    // Get the first clinic to assign the patient to
-    const clinic = await prisma.clinic.findFirst();
+    const store = getStore();
+
+    const clinic = store.clinics[0];
     if (!clinic) {
       return NextResponse.json({ error: 'No clinic found in database' }, { status: 500 });
     }
 
     const insuranceStatus = (insuranceProvider && memberId) ? 'Pending' : 'Missing';
 
-    const patient = await prisma.patient.create({
-      data: {
-        name,
-        dob: new Date(dob),
-        email: email || null,
-        phone: phone || null,
-        clinicId: clinic.id,
-        insuranceProvider: insuranceProvider || null,
-        memberId: memberId || null,
-        groupNumber: groupNumber || null,
-        insuranceStatus,
-      },
-    });
+    const patient = {
+      id: uuid(),
+      name,
+      dob: new Date(dob).toISOString(),
+      email: email || null,
+      phone: phone || null,
+      clinicId: clinic.id,
+      insuranceProvider: insuranceProvider || null,
+      memberId: memberId || null,
+      groupNumber: groupNumber || null,
+      insuranceStatus,
+      createdAt: new Date().toISOString(),
+    };
+
+    store.patients.push(patient);
 
     // Create Audit Log
-    await prisma.auditLog.create({
-      data: {
-        userId: userId || null,
-        userName: userName || 'Front Desk',
-        action: 'Add Patient',
-        details: `Added patient ${name} to directory. Insurance status: ${insuranceStatus}.`,
-      },
+    store.auditLogs.push({
+      id: uuid(),
+      userId: userId || null,
+      userName: userName || 'Front Desk',
+      action: 'Add Patient',
+      details: `Added patient ${name} to directory. Insurance status: ${insuranceStatus}.`,
+      timestamp: new Date().toISOString(),
     });
 
     return NextResponse.json(patient);

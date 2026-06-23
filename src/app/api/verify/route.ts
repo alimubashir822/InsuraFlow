@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { getStore } from '@/lib/store';
+import { v4Polyfill as uuid } from '@/lib/uuid';
 
 // Helper to delay execution to mock network/API latency
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -13,14 +14,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Patient ID is required' }, { status: 400 });
     }
 
-    // 1. Fetch patient
-    const patient = await prisma.patient.findUnique({
-      where: { id: patientId },
-    });
+    const store = getStore();
 
-    if (!patient) {
+    // 1. Fetch patient
+    const patientIndex = store.patients.findIndex((p) => p.id === patientId);
+    if (patientIndex === -1) {
       return NextResponse.json({ error: 'Patient not found' }, { status: 404 });
     }
+
+    const patient = store.patients[patientIndex];
 
     if (!patient.insuranceProvider || !patient.memberId) {
       return NextResponse.json(
@@ -30,26 +32,27 @@ export async function POST(request: Request) {
     }
 
     // 2. Create Verification Request with Pending status
-    const verificationRequest = await prisma.verificationRequest.create({
-      data: {
-        patientId: patient.id,
-        status: 'Pending',
-        requestedBy: userName || 'Billing System',
-      },
-    });
+    const verificationRequestId = uuid();
+    const verificationRequest = {
+      id: verificationRequestId,
+      patientId: patient.id,
+      status: 'Pending',
+      requestedBy: userName || 'Billing System',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    store.verificationRequests.push(verificationRequest);
 
     // Update patient status to Pending
-    await prisma.patient.update({
-      where: { id: patient.id },
-      data: { insuranceStatus: 'Pending' },
-    });
+    store.patients[patientIndex] = { ...patient, insuranceStatus: 'Pending' };
 
     // 3. Wait for 1.5 seconds to simulate API/OCR/AI processing latency
     await delay(1500);
 
     // 4. Evaluate eligibility logic based on Member ID
-    const isInvalid = 
-      patient.memberId.toUpperCase().includes('INVALID') || 
+    const isInvalid =
+      patient.memberId.toUpperCase().includes('INVALID') ||
       patient.memberId.length < 5;
 
     let updatedStatus = 'Verified';
@@ -64,7 +67,7 @@ export async function POST(request: Request) {
     let copay = 20.0;
     let coinsurance = 10.0;
     let estimatedPatientCost = 75.0;
-    let missingInfo = null;
+    let missingInfo: string | null = null;
 
     if (isInvalid) {
       updatedStatus = 'Issues';
@@ -96,7 +99,7 @@ export async function POST(request: Request) {
         copay = 10.0;
         coinsurance = 20.0;
         deductible = 250.0;
-        deductibleMet = 250.0; // Met!
+        deductibleMet = 250.0;
         estimatedPatientCost = 45.0;
         summaryNotes = `AI Coverage Analysis: Patient has active ${planName} coverage. Preventive care is covered at 100%. Major treatments are covered at 80% with a 20% coinsurance. Deductible of $250 has been fully MET for the calendar year. Estimated out-of-pocket responsibility for basic diagnostic exams is $45. Specialist visits do not require a pre-authorization.`;
       } else if (providerLower.includes('united') || providerLower.includes('uhc')) {
@@ -114,64 +117,64 @@ export async function POST(request: Request) {
     }
 
     // 5. Update patient status
-    await prisma.patient.update({
-      where: { id: patient.id },
-      data: { insuranceStatus: updatedStatus },
-    });
+    store.patients[patientIndex] = { ...store.patients[patientIndex], insuranceStatus: updatedStatus };
 
     // 6. Update Verification Request
-    await prisma.verificationRequest.update({
-      where: { id: verificationRequest.id },
-      data: { status: requestStatus },
-    });
+    const vReqIndex = store.verificationRequests.findIndex((v) => v.id === verificationRequestId);
+    if (vReqIndex !== -1) {
+      store.verificationRequests[vReqIndex] = {
+        ...store.verificationRequests[vReqIndex],
+        status: requestStatus,
+        updatedAt: new Date().toISOString(),
+      };
+    }
 
     // 7. Create Eligibility Result
-    const eligibilityResult = await prisma.eligibilityResult.create({
-      data: {
-        requestId: verificationRequest.id,
-        coverageStatus,
-        planName,
-        summaryNotes,
-        dentalCleaningPct,
-        xrayPct,
-        estimatedPatientCost,
-        missingInfo,
-      },
-    });
+    const eligibilityResult = {
+      id: uuid(),
+      requestId: verificationRequestId,
+      coverageStatus,
+      planName,
+      summaryNotes,
+      dentalCleaningPct,
+      xrayPct,
+      estimatedPatientCost,
+      missingInfo,
+      createdAt: new Date().toISOString(),
+    };
+
+    store.eligibilityResults.push(eligibilityResult);
 
     // 8. Create Insurance Plan if successful
     if (coverageStatus === 'Active') {
       // Delete old plans for clean state
-      await prisma.insurancePlan.deleteMany({
-        where: { patientId: patient.id },
-      });
+      store.insurancePlans = store.insurancePlans.filter((p) => p.patientId !== patient.id);
 
-      await prisma.insurancePlan.create({
-        data: {
-          patientId: patient.id,
-          planName,
-          providerName: patient.insuranceProvider,
-          effectiveDate: new Date('2026-01-01'),
-          preventiveCare: dentalCleaningPct > 0,
-          specialistReq: planName.includes('HMO') || planName.includes('Select') || planName.includes('Choice Plus'),
-          deductible,
-          deductibleMet,
-          copay,
-          coinsurance,
-        },
+      store.insurancePlans.push({
+        id: uuid(),
+        patientId: patient.id,
+        planName,
+        providerName: patient.insuranceProvider,
+        effectiveDate: '2026-01-01T00:00:00.000Z',
+        preventiveCare: dentalCleaningPct > 0,
+        specialistReq: planName.includes('HMO') || planName.includes('Select') || planName.includes('Choice Plus'),
+        deductible,
+        deductibleMet,
+        copay,
+        coinsurance,
       });
     }
 
     // 9. Log Audit Event
-    await prisma.auditLog.create({
-      data: {
-        userId: userId || null,
-        userName: userName || 'AI Assistant',
-        action: 'Verify Insurance',
-        details: isInvalid
-          ? `Attempted verification for ${patient.name} (${patient.insuranceProvider}). Failed: Invalid Member ID.`
-          : `Verified active insurance eligibility for ${patient.name} (${patient.insuranceProvider} - ${planName}).`,
-      },
+    store.auditLogs.push({
+      id: uuid(),
+      userId: userId || null,
+      userName: userName || 'AI Assistant',
+      action: 'Verify Insurance',
+      details: isInvalid
+        ? `Attempted verification for ${patient.name} (${patient.insuranceProvider}). Failed: Invalid Member ID.`
+        : `Verified active insurance eligibility for ${patient.name} (${patient.insuranceProvider} - ${planName}).`,
+      timestamp: new Date().toISOString(),
     });
 
     return NextResponse.json({

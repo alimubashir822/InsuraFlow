@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { getStore } from '@/lib/store';
+import { v4Polyfill as uuid } from '@/lib/uuid';
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -35,36 +36,39 @@ export async function POST(request: Request) {
       nameOnCard = 'David Miller';
     }
 
-    // Write to audit log if userName/userId are provided
+    const store = getStore();
+
+    // Write to audit log and update patient if patientId is provided
     if (patientId) {
-      await prisma.auditLog.create({
-        data: {
-          userId: userId || null,
-          userName: userName || 'OCR Scanner',
-          action: 'Scan Card',
-          details: `Scanned insurance card image (${fileName || 'card_upload.png'}) for patient ID ${patientId}. Extracted: ${provider}, Member ID: ${memberId}.`,
-        },
+      store.auditLogs.push({
+        id: uuid(),
+        userId: userId || null,
+        userName: userName || 'OCR Scanner',
+        action: 'Scan Card',
+        details: `Scanned insurance card image (${fileName || 'card_upload.png'}) for patient ID ${patientId}. Extracted: ${provider}, Member ID: ${memberId}.`,
+        timestamp: new Date().toISOString(),
       });
 
       // Update patient's insurance details
-      await prisma.patient.update({
-        where: { id: patientId },
-        data: {
+      const patientIndex = store.patients.findIndex((p) => p.id === patientId);
+      if (patientIndex !== -1) {
+        store.patients[patientIndex] = {
+          ...store.patients[patientIndex],
           insuranceProvider: provider,
           memberId,
           groupNumber,
           insuranceStatus: 'Pending', // Now has details, needs verification
-        },
-      });
+        };
+      }
 
       // Create a mock document for the scanned card
-      await prisma.document.create({
-        data: {
-          patientId,
-          name: fileName || 'scanned_card_front.jpg',
-          fileUrl: '/mock-documents/' + (fileName || 'scanned_card_front.jpg'),
-          docType: 'InsuranceCardFront',
-        },
+      store.documents.push({
+        id: uuid(),
+        patientId,
+        name: fileName || 'scanned_card_front.jpg',
+        fileUrl: '/mock-documents/' + (fileName || 'scanned_card_front.jpg'),
+        docType: 'InsuranceCardFront',
+        createdAt: new Date().toISOString(),
       });
     }
 
