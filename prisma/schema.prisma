@@ -1,0 +1,185 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  clinics   Clinic[]
+  createdAt DateTime @default(now())
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  role      String   // Admin, BillingManager, FrontDesk, Doctor, Patient
+  clinicId  String?
+  clinic    Clinic?  @relation(fields: [clinicId], references: [id])
+  auditLogs AuditLog[]
+  createdAt DateTime @default(now())
+}
+
+model Clinic {
+  id             String        @id @default(uuid())
+  name           String
+  address        String
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  users          User[]
+  patients       Patient[]
+  createdAt      DateTime      @default(now())
+}
+
+model Patient {
+  id                    String                @id @default(uuid())
+  name                  String
+  dob                   DateTime
+  email                 String?
+  phone                 String?
+  clinicId              String
+  clinic                Clinic                @relation(fields: [clinicId], references: [id])
+  insuranceProvider     String?
+  memberId              String?
+  groupNumber           String?
+  insuranceStatus       String                @default("Missing") // Missing, Pending, Verified, Issues
+  insurancePlans        InsurancePlan[]
+  verificationRequests  VerificationRequest[]
+  authorizations        Authorization[]
+  claims                Claim[]
+  payments              Payment[]
+  documents             Document[]
+  aiInsights            AIInsight[]
+  createdAt             DateTime              @default(now())
+}
+
+model InsuranceProvider {
+  id         String   @id @default(uuid())
+  name       String
+  payerId    String   @unique
+  phone      String?
+  portalUrl  String?
+}
+
+model InsurancePlan {
+  id             String   @id @default(uuid())
+  patientId      String
+  patient        Patient  @relation(fields: [patientId], references: [id])
+  planName       String   // e.g., Premium PPO
+  providerName   String   // e.g., Blue Cross
+  effectiveDate  DateTime
+  preventiveCare Boolean  @default(true)
+  specialistReq  Boolean  @default(false) // requires referral
+  deductible     Float    @default(0.0)
+  deductibleMet  Float    @default(0.0)
+  copay          Float    @default(0.0)
+  coinsurance    Float    @default(0.0) // percentage
+}
+
+model VerificationRequest {
+  id          String   @id @default(uuid())
+  patientId   String
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  status      String   // Pending, Completed, Failed
+  requestedBy String   // User Name
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  results     EligibilityResult[]
+}
+
+model EligibilityResult {
+  id                    String              @id @default(uuid())
+  requestId             String
+  request               VerificationRequest @relation(fields: [requestId], references: [id])
+  coverageStatus        String              // Active, Inactive
+  planName              String
+  summaryNotes          String              // AI-generated summary of coverage
+  dentalCleaningPct     Int                 @default(100)
+  xrayPct               Int                 @default(80)
+  estimatedPatientCost  Float               @default(0.0)
+  missingInfo           String?             // e.g., "Missing diagnosis code"
+  createdAt             DateTime            @default(now())
+}
+
+model Authorization {
+  id            String   @id @default(uuid())
+  patientId     String
+  patient       Patient  @relation(fields: [patientId], references: [id])
+  procedureCode String   // e.g. D6010, MRI
+  procedureDesc String
+  status        String   // Submitted, InReview, Approved, Denied
+  submittedDate DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  authCode      String?
+  details       String?
+}
+
+model Claim {
+  id              String   @id @default(uuid())
+  patientId       String
+  patient         Patient  @relation(fields: [patientId], references: [id])
+  treatmentCode   String   // ICD-10 or HCPCS
+  treatmentDesc   String
+  totalCharge     Float
+  insurancePaid   Float    @default(0.0)
+  patientPaid     Float    @default(0.0)
+  status          String   @default("Draft") // Draft, Reviewing, Ready, Submitted, Denied, Paid
+  riskScore       String   @default("Low") // Low, Medium, High
+  missingCodes    String?  // comma-separated missing codes
+  createdAt       DateTime @default(now())
+}
+
+model Payment {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  amount    Float
+  method    String   // CreditCard, Cash, Check, Insurance
+  status    String   // Completed, Pending, Failed
+  createdAt DateTime @default(now())
+}
+
+model Document {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  name      String
+  fileUrl   String
+  docType   String   // InsuranceCardFront, InsuranceCardBack, ClinicalNote
+  createdAt DateTime @default(now())
+}
+
+model AutomationRule {
+  id         String   @id @default(uuid())
+  name       String
+  trigger    String
+  condition  String
+  actions    String   // comma-separated list of actions
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+}
+
+model AIInsight {
+  id               String   @id @default(uuid())
+  patientId        String?
+  patient          Patient? @relation(fields: [patientId], references: [id])
+  type             String   // Leakage, DenialRisk, Expiration
+  potentialRevenue Float
+  description      String
+  createdAt        DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  userName  String
+  action    String   // e.g., "Verified Insurance"
+  details   String   // e.g., "Verified Blue Cross insurance for John Smith"
+  timestamp DateTime @default(now())
+}
